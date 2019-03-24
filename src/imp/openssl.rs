@@ -18,32 +18,32 @@ use self::openssl::ssl::{
 };
 use self::openssl::x509::{X509VerifyResult, X509};
 
-fn supported_protocols(
-    min: Option<Protocol>,
-    max: Option<Protocol>,
-    ctx: &mut SslContextBuilder,
-) -> Result<(), ErrorStack> {
-    use self::openssl::ssl::SslOptions;
-
-    let no_ssl_mask = SslOptions::NO_SSL_MASK;
-
-    ctx.clear_options(no_ssl_mask);
-    let mut options = SslOptions::empty();
-    options |= match min {
-        None | Some(Protocol::Dtlsv10) => SslOptions::empty(),
-        Some(Protocol::Dtlsv12) => SslOptions::NO_DTLSV1,
-        Some(Protocol::__NonExhaustive) => unreachable!(),
-    };
-    options |= match max {
-        None | Some(Protocol::Dtlsv12) => SslOptions::empty(),
-        Some(Protocol::Dtlsv10) => SslOptions::NO_DTLSV1_2,
-        Some(Protocol::__NonExhaustive) => unreachable!(),
-    };
-
-    ctx.set_options(options);
-
-    Ok(())
-}
+//fn supported_protocols(
+//    min: Option<Protocol>,
+//    max: Option<Protocol>,
+//    ctx: &mut SslContextBuilder,
+//) -> Result<(), ErrorStack> {
+//    use self::openssl::ssl::SslOptions;
+//
+//    let no_ssl_mask = SslOptions::NO_SSL_MASK;
+//
+//    ctx.clear_options(no_ssl_mask);
+//    let mut options = SslOptions::empty();
+//    options |= match min {
+//        None | Some(Protocol::Dtlsv10) => SslOptions::empty(),
+//        Some(Protocol::Dtlsv12) => SslOptions::NO_DTLSV1,
+//        Some(Protocol::__NonExhaustive) => unreachable!(),
+//    };
+//    options |= match max {
+//        None | Some(Protocol::Dtlsv12) => SslOptions::empty(),
+//        Some(Protocol::Dtlsv10) => SslOptions::NO_DTLSV1_2,
+//        Some(Protocol::__NonExhaustive) => unreachable!(),
+//    };
+//
+//    ctx.set_options(options);
+//
+//    Ok(())
+//}
 
 fn init_trust() {
     static ONCE: Once = ONCE_INIT;
@@ -261,7 +261,7 @@ impl DtlsConnector {
             }
         }
 
-        supported_protocols(builder.min_protocol, builder.max_protocol, &mut connector)?;
+//        supported_protocols(builder.min_protocol, builder.max_protocol, &mut connector)?;
 
         for cert in &builder.root_certificates {
             if let Err(err) = connector.cert_store_mut().add_cert((cert.0).0.clone()) {
@@ -322,7 +322,7 @@ impl DtlsAcceptor {
                 acceptor.add_extra_chain_cert(cert.to_owned())?;
             }
         }
-        supported_protocols(builder.min_protocol, builder.max_protocol, &mut acceptor)?;
+//        supported_protocols(builder.min_protocol, builder.max_protocol, &mut acceptor)?;
 
         Ok(DtlsAcceptor(acceptor.build()))
     }

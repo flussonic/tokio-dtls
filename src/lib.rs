@@ -1,18 +1,18 @@
 //! An abstraction over OpenSSL DTLS implementations.
 
-#[cfg(test)]
-extern crate hex;
 extern crate futures;
 #[macro_use]
 extern crate tokio_io;
 extern crate bytes;
 
-
+use core::fmt::Write;
+use openssl::hash::MessageDigest;
 use std::any::Any;
 use std::error;
 use std::fmt;
 use std::io;
 use std::result;
+use std::str::FromStr;
 
 #[macro_use]
 extern crate log;
@@ -23,8 +23,7 @@ mod imp;
 #[cfg(test)]
 mod test;
 
-mod tokio_dtls;
-//mod udp_session;
+pub mod tokio_dtls;
 
 /// A typedef of the result-type returned by many methods.
 pub type Result<T> = result::Result<T, Error>;
@@ -83,6 +82,10 @@ impl Identity {
         let identity = imp::Identity::from_pkcs12(der, password)?;
         Ok(Identity(identity))
     }
+
+    pub fn certificate(&self) -> Certificate {
+        Certificate(self.0.certificate())
+    }
 }
 
 /// An X509 certificate.
@@ -107,14 +110,22 @@ impl Certificate {
         let der = self.0.to_der()?;
         Ok(der)
     }
+
+    pub fn fingerprint(
+        &self,
+        signature_algorithm: crate::SignatureAlgorithm,
+    ) -> Result<crate::CertificateFingerprint> {
+        let fingerprint = self.0.fingerprint(signature_algorithm)?;
+        Ok(fingerprint)
+    }
 }
 
 /// A DTLS stream which has been interrupted midway through the handshake process.
 pub struct MidHandshakeDtlsStream<S>(imp::MidHandshakeDtlsStream<S>);
 
 impl<S> fmt::Debug for MidHandshakeDtlsStream<S>
-    where
-        S: fmt::Debug,
+where
+    S: fmt::Debug,
 {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.0, fmt)
@@ -122,8 +133,8 @@ impl<S> fmt::Debug for MidHandshakeDtlsStream<S>
 }
 
 impl<S> MidHandshakeDtlsStream<S>
-    where
-        S: io::Read + io::Write,
+where
+    S: io::Read + io::Write,
 {
     /// Returns a shared reference to the inner stream.
     pub fn get_ref(&self) -> &S {
@@ -166,8 +177,8 @@ pub enum HandshakeError<S> {
 }
 
 impl<S> error::Error for HandshakeError<S>
-    where
-        S: Any + fmt::Debug,
+where
+    S: Any + fmt::Debug,
 {
     fn description(&self) -> &str {
         "handshake error"
@@ -182,8 +193,8 @@ impl<S> error::Error for HandshakeError<S>
 }
 
 impl<S> fmt::Display for HandshakeError<S>
-    where
-        S: Any + fmt::Debug,
+where
+    S: Any + fmt::Debug,
 {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match *self {
@@ -204,8 +215,7 @@ impl<S> From<imp::HandshakeError<S>> for HandshakeError<S> {
     }
 }
 
-
-#[derive(Hash, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Hash, Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub enum SrtpProfile {
     Aes128CmSha180,
     Aes128CmSha132,
@@ -232,7 +242,47 @@ impl ToString for SrtpProfile {
             SrtpProfile::AeadAes128Gcm => "SRTP_AEAD_AES_128_GCM",
             SrtpProfile::AeadAes256Gcm => "SRTP_AEAD_AES_256_GCM",
             SrtpProfile::__Nonexhaustive => unreachable!(),
-        }.to_string()
+        }
+        .to_string()
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum SrtpProfileError {
+    BadProfile,
+}
+
+impl error::Error for SrtpProfileError {
+    fn description(&self) -> &str {
+        match *self {
+            SrtpProfileError::BadProfile => "bad SRTP profile",
+        }
+    }
+
+    fn cause(&self) -> Option<&error::Error> {
+        None
+    }
+}
+
+impl fmt::Display for SrtpProfileError {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            SrtpProfileError::BadProfile => fmt.write_str("bad SRTP profile"),
+        }
+    }
+}
+
+impl FromStr for SrtpProfile {
+    type Err = SrtpProfileError;
+
+    fn from_str(s: &str) -> result::Result<Self, SrtpProfileError> {
+        match s {
+            "SRTP_AES128_CM_SHA1_80" => Ok(SrtpProfile::Aes128CmSha180),
+            "SRTP_AES128_CM_SHA1_32" => Ok(SrtpProfile::Aes128CmSha132),
+            "SRTP_AEAD_AES_128_GCM" => Ok(SrtpProfile::AeadAes128Gcm),
+            "SRTP_AEAD_AES_256_GCM" => Ok(SrtpProfile::AeadAes256Gcm),
+            _ => Err(SrtpProfileError::BadProfile),
+        }
     }
 }
 
@@ -267,7 +317,10 @@ impl DtlsConnectorBuilder {
     /// A value of `None` enables support for the oldest protocols supported by the implementation.
     ///
     /// Defaults to `Some(Protocol::Dtlsv10)`.
-    pub fn min_protocol_version(&mut self, protocol: Option<Protocol>) -> &mut DtlsConnectorBuilder {
+    pub fn min_protocol_version(
+        &mut self,
+        protocol: Option<Protocol>,
+    ) -> &mut DtlsConnectorBuilder {
         self.min_protocol = protocol;
         self
     }
@@ -277,7 +330,10 @@ impl DtlsConnectorBuilder {
     /// A value of `None` enables support for the newest protocols supported by the implementation.
     ///
     /// Defaults to `None`.
-    pub fn max_protocol_version(&mut self, protocol: Option<Protocol>) -> &mut DtlsConnectorBuilder {
+    pub fn max_protocol_version(
+        &mut self,
+        protocol: Option<Protocol>,
+    ) -> &mut DtlsConnectorBuilder {
         self.max_protocol = protocol;
         self
     }
@@ -342,7 +398,6 @@ impl DtlsConnectorBuilder {
     }
 }
 
-
 /// A builder for client-side DTLS connections.
 #[derive(Clone)]
 pub struct DtlsConnector(imp::DtlsConnector);
@@ -384,17 +439,23 @@ impl DtlsConnector {
         domain: &str,
         stream: S,
     ) -> result::Result<DtlsStream<S>, HandshakeError<S>>
-        where
-            S: io::Read + io::Write,
+    where
+        S: io::Read + io::Write,
     {
         let s = self.0.connect(domain, stream)?;
         Ok(DtlsStream(s))
+    }
+
+    /// Convert this `DtlsConnector` to tokio variant
+    pub fn into_async(self) -> tokio_dtls::DtlsConnector {
+        tokio_dtls::DtlsConnector { inner: self }
     }
 }
 
 /// A builder for `DtlsAcceptor`s.
 pub struct DtlsAcceptorBuilder {
     identity: Identity,
+    srtp_profiles: Vec<SrtpProfile>,
     min_protocol: Option<Protocol>,
     max_protocol: Option<Protocol>,
 }
@@ -417,6 +478,13 @@ impl DtlsAcceptorBuilder {
     /// Defaults to `None`.
     pub fn max_protocol_version(&mut self, protocol: Option<Protocol>) -> &mut DtlsAcceptorBuilder {
         self.max_protocol = protocol;
+        self
+    }
+
+    /// TODO
+    ///
+    pub fn add_srtp_profile(&mut self, profile: SrtpProfile) -> &mut DtlsAcceptorBuilder {
+        self.srtp_profiles.push(profile);
         self
     }
 
@@ -445,6 +513,7 @@ impl DtlsAcceptor {
     pub fn builder(identity: Identity) -> DtlsAcceptorBuilder {
         DtlsAcceptorBuilder {
             identity,
+            srtp_profiles: vec![],
             min_protocol: Some(Protocol::Dtlsv10),
             max_protocol: None,
         }
@@ -457,13 +526,18 @@ impl DtlsAcceptor {
     /// which can be used to restart the handshake when the socket is ready
     /// again.
     pub fn accept<S>(&self, stream: S) -> result::Result<DtlsStream<S>, HandshakeError<S>>
-        where
-            S: io::Read + io::Write,
+    where
+        S: io::Read + io::Write,
     {
         match self.0.accept(stream) {
             Ok(s) => Ok(DtlsStream(s)),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Convert this `DtlsAcceptor` to tokio variant
+    pub fn into_async(self) -> tokio_dtls::DtlsAcceptor {
+        tokio_dtls::DtlsAcceptor { inner: self }
     }
 }
 
@@ -477,6 +551,16 @@ impl<S: fmt::Debug> fmt::Debug for DtlsStream<S> {
 }
 
 impl<S: io::Read + io::Write> DtlsStream<S> {
+    /// Export keying material
+    pub fn keying_material(&self, len: usize) -> Result<Vec<u8>> {
+        Ok(self.0.keying_material(len)?)
+    }
+
+    /// Export keying material
+    pub fn selected_srtp_profile(&self) -> Result<Option<SrtpProfile>> {
+        Ok(self.0.selected_srtp_profile()?)
+    }
+
     /// Returns a shared reference to the inner stream.
     pub fn get_ref(&self) -> &S {
         self.0.get_ref()
@@ -485,12 +569,6 @@ impl<S: io::Read + io::Write> DtlsStream<S> {
     /// Returns a mutable reference to the inner stream.
     pub fn get_mut(&mut self) -> &mut S {
         self.0.get_mut()
-    }
-
-    /// Returns the number of bytes that can be read without resulting in any
-    /// network calls.
-    pub fn buffered_read_size(&self) -> Result<usize> {
-        Ok(self.0.buffered_read_size()?)
     }
 
     /// Returns the peer's leaf certificate, if available.
@@ -502,6 +580,47 @@ impl<S: io::Read + io::Write> DtlsStream<S> {
     pub fn shutdown(&mut self) -> io::Result<()> {
         self.0.shutdown()?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SignatureAlgorithm {
+    Sha1,
+    Sha256,
+}
+
+#[derive(Clone, Debug)]
+pub struct CertificateFingerprint {
+    bytes: Vec<u8>,
+    signature_algorithm: SignatureAlgorithm,
+}
+
+impl ToString for CertificateFingerprint {
+    fn to_string(&self) -> String {
+        let mut s = match self.signature_algorithm {
+            SignatureAlgorithm::Sha1 => "sha-1 ",
+            SignatureAlgorithm::Sha256 => "sha-256 ",
+        }
+        .to_string();
+
+        for b in &self.bytes {
+            s.write_fmt(format_args!("{:02X}:", b)).unwrap();
+        }
+
+        if s.len() > 0 {
+            s.pop(); //remove last ':'
+        }
+
+        s
+    }
+}
+
+impl CertificateFingerprint {
+    pub fn new(bytes: Vec<u8>, signature_algorithm: SignatureAlgorithm) -> CertificateFingerprint {
+        CertificateFingerprint {
+            bytes,
+            signature_algorithm,
+        }
     }
 }
 

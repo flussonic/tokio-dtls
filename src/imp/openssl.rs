@@ -1,6 +1,13 @@
 extern crate openssl;
 extern crate openssl_probe;
 
+use std::error;
+use std::fmt;
+use std::io;
+use std::sync::{Once, ONCE_INIT};
+
+use crate::{DtlsAcceptorBuilder, DtlsConnectorBuilder, Protocol, SrtpProfile, SrtpProfileError};
+
 use self::openssl::error::ErrorStack;
 use self::openssl::hash::MessageDigest;
 use self::openssl::nid::Nid;
@@ -9,13 +16,7 @@ use self::openssl::ssl::{
     self, MidHandshakeSslStream, SslAcceptor, SslConnector, SslContextBuilder, SslMethod,
     SslVerifyMode,
 };
-use self::openssl::x509::{X509, X509VerifyResult};
-use std::error;
-use std::fmt;
-use std::io;
-use std::sync::{Once, ONCE_INIT};
-
-use crate::{Protocol, DtlsAcceptorBuilder, DtlsConnectorBuilder};
+use self::openssl::x509::{X509VerifyResult, X509};
 
 fn supported_protocols(
     min: Option<Protocol>,
@@ -43,7 +44,6 @@ fn supported_protocols(
 
     Ok(())
 }
-
 
 fn init_trust() {
     static ONCE: Once = ONCE_INIT;
@@ -73,6 +73,7 @@ fn load_android_root_certs(connector: &mut SslContextBuilder) -> Result<(), Erro
 pub enum Error {
     Normal(ErrorStack),
     Ssl(ssl::Error, X509VerifyResult),
+    SrtpProfile(SrtpProfileError),
 }
 
 impl error::Error for Error {
@@ -80,6 +81,7 @@ impl error::Error for Error {
         match *self {
             Error::Normal(ref e) => error::Error::description(e),
             Error::Ssl(ref e, _) => error::Error::description(e),
+            Error::SrtpProfile(ref e) => error::Error::description(e),
         }
     }
 
@@ -87,6 +89,7 @@ impl error::Error for Error {
         match *self {
             Error::Normal(ref e) => error::Error::cause(e),
             Error::Ssl(ref e, _) => error::Error::cause(e),
+            Error::SrtpProfile(ref e) => error::Error::cause(e),
         }
     }
 }
@@ -97,6 +100,7 @@ impl fmt::Display for Error {
             Error::Normal(ref e) => fmt::Display::fmt(e, fmt),
             Error::Ssl(ref e, X509VerifyResult::OK) => fmt::Display::fmt(e, fmt),
             Error::Ssl(ref e, v) => write!(fmt, "{} ({})", e, v),
+            Error::SrtpProfile(ref e) => fmt::Display::fmt(e, fmt),
         }
     }
 }
@@ -107,6 +111,12 @@ impl From<ErrorStack> for Error {
     }
 }
 
+impl From<SrtpProfileError> for Error {
+    fn from(err: SrtpProfileError) -> Error {
+        Error::SrtpProfile(err)
+    }
+}
+
 pub struct Identity(ParsedPkcs12);
 
 impl Identity {
@@ -114,6 +124,10 @@ impl Identity {
         let pkcs12 = Pkcs12::from_der(buf)?;
         let parsed = pkcs12.parse(pass)?;
         Ok(Identity(parsed))
+    }
+
+    pub fn certificate(&self) -> Certificate {
+        Certificate(self.0.cert.clone())
     }
 }
 
@@ -135,13 +149,30 @@ impl Certificate {
         let der = self.0.to_der()?;
         Ok(der)
     }
+
+    pub fn fingerprint(
+        &self,
+        signature_algorithm: crate::SignatureAlgorithm,
+    ) -> Result<crate::CertificateFingerprint, Error> {
+        let md = match signature_algorithm {
+            crate::SignatureAlgorithm::Sha1 => MessageDigest::sha1(),
+            crate::SignatureAlgorithm::Sha256 => MessageDigest::sha256(),
+        };
+
+        let digest = self.0.digest(md)?;
+
+        Ok(crate::CertificateFingerprint {
+            bytes: digest.to_vec(),
+            signature_algorithm,
+        })
+    }
 }
 
 pub struct MidHandshakeDtlsStream<S>(MidHandshakeSslStream<S>);
 
 impl<S> fmt::Debug for MidHandshakeDtlsStream<S>
-    where
-        S: fmt::Debug,
+where
+    S: fmt::Debug,
 {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.0, fmt)
@@ -159,8 +190,8 @@ impl<S> MidHandshakeDtlsStream<S> {
 }
 
 impl<S> MidHandshakeDtlsStream<S>
-    where
-        S: io::Read + io::Write,
+where
+    S: io::Read + io::Write,
 {
     pub fn handshake(self) -> Result<DtlsStream<S>, HandshakeError<S>> {
         match self.0.handshake() {
@@ -211,10 +242,14 @@ impl DtlsConnector {
         let mut connector = SslConnector::builder(SslMethod::dtls()).unwrap();
 
         if builder.srtp_profiles.len() > 0 {
-            let srtp_line = builder.srtp_profiles.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(":");
+            let srtp_line = builder
+                .srtp_profiles
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(":");
             connector.set_tlsext_use_srtp(&srtp_line)?;
         }
-
 
         if let Some(ref identity) = builder.identity {
             connector.set_certificate(&(identity.0).0.cert)?;
@@ -235,7 +270,7 @@ impl DtlsConnector {
         }
 
         #[cfg(target_os = "android")]
-            load_android_root_certs(&mut connector)?;
+        load_android_root_certs(&mut connector)?;
 
         Ok(DtlsConnector {
             connector: connector.build(),
@@ -246,8 +281,8 @@ impl DtlsConnector {
     }
 
     pub fn connect<S>(&self, domain: &str, stream: S) -> Result<DtlsStream<S>, HandshakeError<S>>
-        where
-            S: io::Read + io::Write,
+    where
+        S: io::Read + io::Write,
     {
         let mut ssl = self
             .connector
@@ -269,6 +304,17 @@ pub struct DtlsAcceptor(SslAcceptor);
 impl DtlsAcceptor {
     pub fn new(builder: &DtlsAcceptorBuilder) -> Result<DtlsAcceptor, Error> {
         let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::dtls())?;
+
+        if builder.srtp_profiles.len() > 0 {
+            let srtp_line = builder
+                .srtp_profiles
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(":");
+            acceptor.set_tlsext_use_srtp(&srtp_line)?;
+        }
+
         acceptor.set_private_key(&(builder.identity.0).0.pkey)?;
         acceptor.set_certificate(&(builder.identity.0).0.cert)?;
         if let Some(ref chain) = (builder.identity.0).0.chain {
@@ -282,8 +328,8 @@ impl DtlsAcceptor {
     }
 
     pub fn accept<S>(&self, stream: S) -> Result<DtlsStream<S>, HandshakeError<S>>
-        where
-            S: io::Read + io::Write,
+    where
+        S: io::Read + io::Write,
     {
         let s = self.0.accept(stream)?;
         Ok(DtlsStream(s))
@@ -299,6 +345,21 @@ impl<S: fmt::Debug> fmt::Debug for DtlsStream<S> {
 }
 
 impl<S: io::Read + io::Write> DtlsStream<S> {
+    pub fn keying_material(&self, len: usize) -> Result<Vec<u8>, Error> {
+        let mut buf = vec![0; len];
+        self.0
+            .ssl()
+            .export_keying_material(&mut buf, "EXTRACTOR-dtls_srtp", None)?;
+        Ok(buf)
+    }
+
+    pub fn selected_srtp_profile(&self) -> Result<Option<SrtpProfile>, Error> {
+        match self.0.ssl().selected_srtp_profile() {
+            Some(profile) => Ok(profile.name().parse()?).map(Some),
+            None => Ok(None),
+        }
+    }
+
     pub fn get_ref(&self) -> &S {
         self.0.get_ref()
     }
@@ -313,37 +374,6 @@ impl<S: io::Read + io::Write> DtlsStream<S> {
 
     pub fn peer_certificate(&self) -> Result<Option<Certificate>, Error> {
         Ok(self.0.ssl().peer_certificate().map(Certificate))
-    }
-
-    pub fn tls_server_end_point(&self) -> Result<Option<Vec<u8>>, Error> {
-        let cert = if self.0.ssl().is_server() {
-            self.0.ssl().certificate().map(|x| x.to_owned())
-        } else {
-            self.0.ssl().peer_certificate()
-        };
-
-        let cert = match cert {
-            Some(cert) => cert,
-            None => return Ok(None),
-        };
-
-        let algo_nid = cert.signature_algorithm().object().nid();
-        let signature_algorithms = match algo_nid.signature_algorithms() {
-            Some(algs) => algs,
-            None => return Ok(None),
-        };
-
-        let md = match signature_algorithms.digest {
-            Nid::MD5 | Nid::SHA1 => MessageDigest::sha256(),
-            nid => match MessageDigest::from_nid(nid) {
-                Some(md) => md,
-                None => return Ok(None),
-            },
-        };
-
-        let digest = cert.digest(md)?;
-
-        Ok(Some(digest.to_vec()))
     }
 
     pub fn shutdown(&mut self) -> io::Result<()> {

@@ -2,14 +2,14 @@
 
 use std::io::{self, Read, Write};
 
-use bytes::Buf;
 use bytes::BytesMut;
-use futures::{Async, Future, Poll, AsyncSink};
+use bytes::{Buf, Bytes};
 use futures::Sink;
 use futures::Stream;
+use futures::{Async, AsyncSink, Future, Poll};
 use tokio_io::{AsyncRead, AsyncWrite};
 
-use crate::{Error, HandshakeError};
+use crate::{Error, HandshakeError, SrtpProfile, SrtpProfileError};
 use std::hint::unreachable_unchecked;
 
 /// A wrapper around an underlying raw stream which implements the DTLS
@@ -28,14 +28,14 @@ pub struct DtlsStream<S> {
 /// method.
 #[derive(Clone)]
 pub struct DtlsConnector {
-    inner: crate::DtlsConnector,
+    pub(crate) inner: crate::DtlsConnector,
 }
 
 /// A wrapper around a `crate::DtlsAcceptor`, providing an async `accept`
 /// method.
 #[derive(Clone)]
 pub struct DtlsAcceptor {
-    inner: crate::DtlsAcceptor,
+    pub(crate) inner: crate::DtlsAcceptor,
 }
 
 /// Future returned from `DtlsConnector::connect` which will resolve
@@ -54,7 +54,17 @@ struct MidHandshake<S> {
     inner: Option<Result<crate::DtlsStream<S>, HandshakeError<S>>>,
 }
 
-impl<S> DtlsStream<S> {
+impl<S: Read + Write> DtlsStream<S> {
+    /// Export keying material
+    pub fn keying_material(&self, len: usize) -> Result<Vec<u8>, Error> {
+        self.inner.keying_material(len)
+    }
+
+    /// Return selected SRTP profile
+    pub fn selected_srtp_profile(&self) -> Result<Option<SrtpProfile>, Error> {
+        self.inner.selected_srtp_profile()
+    }
+
     /// Get access to the internal `crate::DtlsStream` stream which also
     /// transitively allows access to `S`.
     pub fn get_ref(&self) -> &crate::DtlsStream<S> {
@@ -70,13 +80,19 @@ impl<S> DtlsStream<S> {
 
 impl<S: Read + Write> Read for DtlsStream<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.inner.read(buf)
+        info!("About to read on DTLS");
+        let r = self.inner.read(buf);
+        info!("read = {:?}", r);
+        r
     }
 }
 
 impl<S: Read + Write> Write for DtlsStream<S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write(buf)
+        info!("About to write on DTLS {} bytes", buf.len());
+        let r = self.inner.write(buf);
+        info!("write = {:?}, len = {}", r, buf.len());
+        r
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -98,8 +114,8 @@ impl DtlsConnector {
     /// domain.
     ///
     pub fn connect<S>(&self, domain: &str, stream: S) -> Connect<S>
-        where
-            S: AsyncRead + AsyncWrite,
+    where
+        S: AsyncRead + AsyncWrite,
     {
         Connect {
             inner: MidHandshake {
@@ -127,20 +143,14 @@ impl DtlsAcceptor {
     /// `TcpListener`. That socket is then passed to this function to perform
     /// the server half of accepting a client connection.
     pub fn accept<S>(&self, stream: S) -> Accept<S>
-        where
-            S: AsyncRead + AsyncWrite,
+    where
+        S: AsyncRead + AsyncWrite,
     {
         Accept {
             inner: MidHandshake {
                 inner: Some(self.inner.accept(stream)),
             },
         }
-    }
-}
-
-impl From<crate::DtlsAcceptor> for DtlsAcceptor {
-    fn from(inner: crate::DtlsAcceptor) -> DtlsAcceptor {
-        DtlsAcceptor { inner }
     }
 }
 

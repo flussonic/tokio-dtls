@@ -13,8 +13,5 @@ tokio-io = "0.1.12"
 log = "0.4.6"
 bytes = "0.4.11"
 
-[dev-dependencies]
-hex = "0.3"
-
 [features]
 vendored = ["openssl/vendored"]

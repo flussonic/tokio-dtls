@@ -1,11 +1,10 @@
 #[allow(unused_imports)]
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::net::SocketAddr;
 use std::net::UdpSocket;
+use std::net::{TcpListener, TcpStream};
 use std::thread;
 
-use hex;
 use tokio::prelude::*;
 
 use super::*;
@@ -107,7 +106,6 @@ mod tests {
             remote_addr: server_addr,
         };
 
-
         let guard = thread::spawn(move || {
             let mut dtls_server = p!(acceptor.accept(server_channel));
 
@@ -125,8 +123,8 @@ mod tests {
 
     #[test]
     fn test_async() {
-        use futures::prelude::*;
         use futures::lazy;
+        use futures::prelude::*;
 
         use tokio::net::UdpSocket;
         use tokio::runtime::Runtime;;
@@ -143,7 +141,7 @@ mod tests {
             .add_srtp_profile(SrtpProfile::AeadAes256Gcm)
             .add_root_certificate(root_ca)
             .build())
-            .into();
+        .into();
 
         let server = p!(UdpSocket::bind(&"127.0.0.1:0".parse().unwrap()));
         let client = p!(UdpSocket::bind(&"127.0.0.1:0".parse().unwrap()));
@@ -164,25 +162,27 @@ mod tests {
         let buf = b"hello".to_vec();
 
         let mut rt = Runtime::new().unwrap();
-        let res = rt.block_on(lazy({
-            let buf = buf.clone();
+        let res = rt
+            .block_on(lazy({
+                let buf = buf.clone();
 
-            move || {
-                tokio::spawn(acceptor.accept(server_channel)
-                    .map_err(|_| ())
-                    .and_then(move |mut conn| {
-                        conn.poll_write(&buf).map_err(|_| ()).map(|_| ())
-                    }));
-                connector.connect("foobar.com", client_channel)
-                    .map_err(|_| ())
-                    .and_then(move |mut connection| {
-                        let mut res = vec![0u8; 5];
-                        connection.poll_read(&mut res[..]).map_err(|_| ()).map(move |_| {
-                            res
+                move || {
+                    tokio::spawn(acceptor.accept(server_channel).map_err(|_| ()).and_then(
+                        move |mut conn| conn.poll_write(&buf).map_err(|_| ()).map(|_| ()),
+                    ));
+                    connector
+                        .connect("foobar.com", client_channel)
+                        .map_err(|_| ())
+                        .and_then(move |mut connection| {
+                            let mut res = vec![0u8; 5];
+                            connection
+                                .poll_read(&mut res[..])
+                                .map_err(|_| ())
+                                .map(move |_| res)
                         })
-                    })
-            }
-        })).unwrap();
+                }
+            }))
+            .unwrap();
         assert_eq!(res, buf);
     }
 }

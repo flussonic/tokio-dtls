@@ -80,19 +80,13 @@ impl<S: Read + Write> DtlsStream<S> {
 
 impl<S: Read + Write> Read for DtlsStream<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        info!("About to read on DTLS");
-        let r = self.inner.read(buf);
-        info!("read = {:?}", r);
-        r
+        self.inner.read(buf)
     }
 }
 
 impl<S: Read + Write> Write for DtlsStream<S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        info!("About to write on DTLS {} bytes", buf.len());
-        let r = self.inner.write(buf);
-        info!("write = {:?}, len = {}", r, buf.len());
-        r
+        self.inner.write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
